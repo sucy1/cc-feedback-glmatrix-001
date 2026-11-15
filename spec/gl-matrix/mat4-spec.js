@@ -751,6 +751,175 @@ function buildMat4Tests() {
                 it("should return the same translation when created", function() { expect(out_t).toBeEqualish([1, 2, 3]); });
             });
 
+            describe("from a translation and shear matrix", function() {
+                let out_shear;
+                beforeEach(function() {
+                    // T * Shear, the case that used to decompose into garbage
+                    mat4.fromRotationTranslationScaleShear(out, quat.create(), [5, 6, 7], [1, 1, 1], [0.5, 0.25, -0.75]);
+                    result = quat.create();
+                    out_t = vec3.create();
+                    out_s = vec3.create();
+                    out_shear = vec3.create();
+                    mat4.decompose(result, out_t, out_s, out, out_shear);
+                });
+                it("should return the unit quaternion", function() {
+                    let unitQuat = quat.create();
+                    quat.identity(unitQuat);
+                    expect(result).toBeEqualish(unitQuat);
+                });
+                it("out_s should be the identity vector", function() { expect(out_s).toBeEqualish([1, 1, 1]); });
+                it("out_t should be the translation vector", function() { expect(out_t).toBeEqualish([5, 6, 7]); });
+                it("out_shear should hold the shear factors", function() { expect(out_shear).toBeEqualish([0.5, 0.25, -0.75]); });
+            });
+
+            describe("from a rotation, non-uniform scale and shear matrix", function() {
+                let q, t, s, shear, out_shear;
+                beforeEach(function() {
+                    let axis = vec3.normalize(vec3.create(), vec3.fromValues(1, 5, 2));
+                    q = quat.setAxisAngle(quat.create(), axis, 0.78972);
+                    t = vec3.fromValues(1, 2, 3);
+                    s = vec3.fromValues(2, 3, 4);
+                    shear = vec3.fromValues(0.4, -0.3, 0.2);
+                    mat4.fromRotationTranslationScaleShear(out, q, t, s, shear);
+                    result = quat.create();
+                    out_t = vec3.create();
+                    out_s = vec3.create();
+                    out_shear = vec3.create();
+                    mat4.decompose(result, out_t, out_s, out, out_shear);
+                });
+                it("should return the same rotation when created", function() {
+                    expect(Math.abs(quat.dot(result, q))).toBeEqualish(1);
+                });
+                it("should return the same scaling factor when created", function() { expect(out_s).toBeEqualish([2, 3, 4]); });
+                it("should return the same translation when created", function() { expect(out_t).toBeEqualish([1, 2, 3]); });
+                it("should return the same shear when created", function() { expect(out_shear).toBeEqualish([0.4, -0.3, 0.2]); });
+            });
+
+            describe("from a mirrored (negative scale) matrix", function() {
+                let q, out_shear;
+                beforeEach(function() {
+                    let axis = vec3.normalize(vec3.create(), vec3.fromValues(1, 5, 2));
+                    q = quat.setAxisAngle(quat.create(), axis, 0.78972);
+                    mat4.fromRotationTranslationScale(out, q, [1, 2, 3], [-2, 3, 4]);
+                    result = quat.create();
+                    out_t = vec3.create();
+                    out_s = vec3.create();
+                    out_shear = vec3.create();
+                    mat4.decompose(result, out_t, out_s, out, out_shear);
+                });
+                it("should report the mirror as a negative X scale", function() { expect(out_s).toBeEqualish([-2, 3, 4]); });
+                it("should not fold the mirror into the rotation", function() {
+                    expect(Math.abs(quat.dot(result, q))).toBeEqualish(1);
+                });
+                it("should return zero shear", function() { expect(out_shear).toBeEqualish([0, 0, 0]); });
+            });
+
+            describe("from a non-decomposable matrix", function() {
+                beforeEach(function() {
+                    result = quat.create();
+                    out_t = vec3.create();
+                    out_s = vec3.create();
+                });
+                it("should return null for a zero scale axis", function() {
+                    mat4.fromScaling(out, [1, 0, 1]);
+                    expect(mat4.decompose(result, out_t, out_s, out)).toBeNull();
+                });
+                it("should return null for a non-affine (projective) matrix", function() {
+                    mat4.perspective(out, Math.PI * 0.5, 1, 0.1, 100);
+                    expect(mat4.decompose(result, out_t, out_s, out)).toBeNull();
+                });
+            });
+
+        });
+
+        describe("fromRotationTranslationScaleShear", function() {
+            it("should place result both in result and out", function() {
+                result = mat4.fromRotationTranslationScaleShear(out, quat.create(), [1, 2, 3], [1, 1, 1], [0, 0, 0]);
+                expect(result).toBe(out);
+            });
+
+            it("should build a shear-only matrix", function() {
+                mat4.fromRotationTranslationScaleShear(out, quat.create(), [1, 2, 3], [1, 1, 1], [0.5, 0.25, -0.75]);
+                expect(out).toBeEqualish([
+                    1, 0, 0, 0,
+                    0.5, 1, 0, 0,
+                    0.25, -0.75, 1, 0,
+                    1, 2, 3, 1
+                ]);
+            });
+
+            it("should match fromRotationTranslationScale when shear is zero", function() {
+                let q = quat.setAxisAngle(quat.create(), vec3.normalize(vec3.create(), vec3.fromValues(1, 5, 2)), 0.78972);
+                mat4.fromRotationTranslationScale(matA, q, [1, 2, 3], [5, 6, 7]);
+                mat4.fromRotationTranslationScaleShear(out, q, [1, 2, 3], [5, 6, 7], [0, 0, 0]);
+                expect(out).toBeEqualish(matA);
+            });
+
+            it("should be the inverse of decompose within 1e-6", function() {
+                // Float64 (plain arrays) so the 1e-6 bound is meaningful
+                let q = [0, 0, 0, 1];
+                quat.setAxisAngle(q, [0.2672612419124244, 0.5345224838248488, 0.8017836807372252], 1.3);
+                let t = [1, 2, 3];
+                let s = [2, 3, 4];
+                let shear = [0.4, -0.3, 0.2];
+
+                let m = new Array(16);
+                mat4.fromRotationTranslationScaleShear(m, q, t, s, shear);
+
+                let r = [0, 0, 0, 0];
+                let rt = [0, 0, 0];
+                let rs = [0, 0, 0];
+                let rsh = [0, 0, 0];
+                mat4.decompose(r, rt, rs, m, rsh);
+
+                let rebuilt = new Array(16);
+                mat4.fromRotationTranslationScaleShear(rebuilt, r, rt, rs, rsh);
+
+                for (let i = 0; i < 16; i++) {
+                    expect(Math.abs(rebuilt[i] - m[i])).toBeLessThan(1e-6);
+                }
+            });
+
+            it("should round-trip a mirrored matrix through decompose", function() {
+                let q = [0, 0, 0, 1];
+                quat.setAxisAngle(q, [0.2672612419124244, 0.5345224838248488, 0.8017836807372252], 1.3);
+
+                let m = new Array(16);
+                mat4.fromRotationTranslationScaleShear(m, q, [1, 2, 3], [-2, 3, 4], [0.4, -0.3, 0.2]);
+
+                let r = [0, 0, 0, 0];
+                let rt = [0, 0, 0];
+                let rs = [0, 0, 0];
+                let rsh = [0, 0, 0];
+                mat4.decompose(r, rt, rs, m, rsh);
+
+                let rebuilt = new Array(16);
+                mat4.fromRotationTranslationScaleShear(rebuilt, r, rt, rs, rsh);
+
+                for (let i = 0; i < 16; i++) {
+                    expect(Math.abs(rebuilt[i] - m[i])).toBeLessThan(1e-6);
+                }
+            });
+        });
+
+        describe("getScaling with a mirrored matrix", function() {
+            beforeEach(function() {
+                let q = quat.setAxisAngle(quat.create(), [0, 1, 0], 0.7);
+                mat4.fromRotationTranslationScale(out, q, [1, 2, 3], [-5, 6, 7]);
+                result = mat4.getScaling(vec3.create(), out);
+            });
+            it("should report the mirror as a negative X scale", function() {
+                expect(result).toBeEqualish([-5, 6, 7]);
+            });
+        });
+
+        describe("getRotation with a mirrored matrix", function() {
+            it("should not fold the mirror into the rotation", function() {
+                let q = quat.setAxisAngle(quat.create(), [0, 1, 0], 0.7);
+                mat4.fromRotationTranslationScale(out, q, [1, 2, 3], [-5, 6, 7]);
+                result = mat4.getRotation(quat.create(), out);
+                expect(Math.abs(quat.dot(result, q))).toBeEqualish(1);
+            });
         });
 
         describe("frustum", function() {

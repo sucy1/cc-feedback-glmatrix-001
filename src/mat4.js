@@ -1145,6 +1145,10 @@ export function getTranslation(out, mat) {
  *  with a normalized Quaternion parameter, the returned vector will be
  *  the same as the scaling vector
  *  originally supplied.
+ * If the matrix contains a reflection (an odd number of negatively
+ *  scaled axes, i.e. a negative determinant), the X component of the
+ *  returned vector is negated so the reflection is reported as a
+ *  negative scale instead of being lost.
  * @param  {vec3} out Vector to receive scaling factor component
  * @param  {ReadonlyMat4} mat Matrix to be decomposed (input)
  * @return {vec3} out
@@ -1164,6 +1168,16 @@ export function getScaling(out, mat) {
   out[1] = Math.sqrt(m21 * m21 + m22 * m22 + m23 * m23);
   out[2] = Math.sqrt(m31 * m31 + m32 * m32 + m33 * m33);
 
+  // A negative determinant means the matrix mirrors (an odd number of
+  // negative scales). Attribute the mirror to the X axis by convention.
+  let det =
+    m11 * (m22 * m33 - m23 * m32) -
+    m21 * (m12 * m33 - m13 * m32) +
+    m31 * (m12 * m23 - m13 * m22);
+  if (det < 0) {
+    out[0] = -out[0];
+  }
+
   return out;
 }
 
@@ -1172,6 +1186,9 @@ export function getScaling(out, mat) {
  *  of a transformation matrix. If a matrix is built with
  *  fromRotationTranslation, the returned quaternion will be the
  *  same as the quaternion originally supplied.
+ * If the matrix contains a reflection (negative determinant), the
+ *  mirror is attributed to a negative X scale (see getScaling) and is
+ *  NOT folded into the returned rotation.
  * @param {quat} out Quaternion to receive the rotation component
  * @param {ReadonlyMat4} mat Matrix to be decomposed (input)
  * @return {quat} out
@@ -1227,15 +1244,41 @@ export function getRotation(out, mat) {
 }
 
 /**
- * Decomposes a transformation matrix into its rotation, translation
- * and scale components. Returns only the rotation component
+ * Decomposes a transformation matrix into its rotation, translation,
+ * scale and (optionally) shear components.
+ *
+ * The matrix is factored as `T * R * Shear * Scale`, where Shear is the
+ * upper triangular matrix built from the shear factors `[xy, xz, yz]`:
+ *
+ *     1  xy  xz  0
+ *     0  1   yz  0
+ *     0  0   1   0
+ *     0  0   0   1
+ *
+ * If the matrix contains a reflection (negative determinant), the X
+ * component of the scaling vector is negated and the rotation is
+ * adjusted accordingly, so the mirror is never folded into the rotation.
+ *
+ * Use fromRotationTranslationScaleShear to recompose a matrix from the
+ * decomposed components.
+ *
  * @param  {quat} out_r Quaternion to receive the rotation component
  * @param  {vec3} out_t Vector to receive the translation vector
  * @param  {vec3} out_s Vector to receive the scaling factor
  * @param  {ReadonlyMat4} mat Matrix to be decomposed (input)
- * @returns {quat} out_r
+ * @param  {vec3} [out_shear] Vector to receive the shear factors
+ *  [xy, xz, yz]. If omitted and the matrix contains shear, the returned
+ *  components will NOT reconstruct the original matrix when combined
+ *  with fromRotationTranslationScale.
+ * @returns {quat} out_r, or null if the matrix cannot be decomposed
+ *  (non-affine bottom row, or a zero-length axis)
  */
-export function decompose(out_r, out_t, out_s, mat) {
+export function decompose(out_r, out_t, out_s, mat, out_shear) {
+  // Only affine transforms can be decomposed into T * R * Shear * Scale
+  if (mat[3] !== 0 || mat[7] !== 0 || mat[11] !== 0) {
+    return null;
+  }
+
   out_t[0] = mat[12];
   out_t[1] = mat[13];
   out_t[2] = mat[14];
@@ -1250,50 +1293,98 @@ export function decompose(out_r, out_t, out_s, mat) {
   let m32 = mat[9];
   let m33 = mat[10];
 
-  out_s[0] = Math.sqrt(m11 * m11 + m12 * m12 + m13 * m13);
-  out_s[1] = Math.sqrt(m21 * m21 + m22 * m22 + m23 * m23);
-  out_s[2] = Math.sqrt(m31 * m31 + m32 * m32 + m33 * m33);
+  // The column length is the (unsigned) scale factor of the first axis
+  let sx = Math.sqrt(m11 * m11 + m12 * m12 + m13 * m13);
+  if (sx < glMatrix.EPSILON) {
+    return null;
+  }
 
-  let is1 = 1 / out_s[0];
-  let is2 = 1 / out_s[1];
-  let is3 = 1 / out_s[2];
+  // A negative determinant means the matrix mirrors (an odd number of
+  // negative scales). Attribute the mirror to the X axis by convention.
+  let det =
+    m11 * (m22 * m33 - m23 * m32) -
+    m21 * (m12 * m33 - m13 * m32) +
+    m31 * (m12 * m23 - m13 * m22);
+  if (det < 0) {
+    sx = -sx;
+  }
 
-  let sm11 = m11 * is1;
-  let sm12 = m12 * is1;
-  let sm13 = m13 * is1;
-  let sm21 = m21 * is2;
-  let sm22 = m22 * is2;
-  let sm23 = m23 * is2;
-  let sm31 = m31 * is3;
-  let sm32 = m32 * is3;
-  let sm33 = m33 * is3;
+  // First orthonormalized column
+  let is1 = 1 / sx;
+  let r00 = m11 * is1;
+  let r01 = m12 * is1;
+  let r02 = m13 * is1;
 
-  let trace = sm11 + sm22 + sm33;
+  // Second column: subtract its component along the first axis. What
+  // remains is the scaled second rotation axis; the removed part is shear.
+  let d01 = m21 * r00 + m22 * r01 + m23 * r02;
+  let e10 = m21 - d01 * r00;
+  let e11 = m22 - d01 * r01;
+  let e12 = m23 - d01 * r02;
+  let sy = Math.sqrt(e10 * e10 + e11 * e11 + e12 * e12);
+  if (sy < glMatrix.EPSILON) {
+    return null;
+  }
+  let is2 = 1 / sy;
+  let r10 = e10 * is2;
+  let r11 = e11 * is2;
+  let r12 = e12 * is2;
+  let shXY = d01 * is2;
+
+  // Third column, orthogonalized against the first two
+  let d02 = m31 * r00 + m32 * r01 + m33 * r02;
+  let d12 = m31 * r10 + m32 * r11 + m33 * r12;
+  let e20 = m31 - d02 * r00 - d12 * r10;
+  let e21 = m32 - d02 * r01 - d12 * r11;
+  let e22 = m33 - d02 * r02 - d12 * r12;
+  let sz = Math.sqrt(e20 * e20 + e21 * e21 + e22 * e22);
+  if (sz < glMatrix.EPSILON) {
+    return null;
+  }
+  let is3 = 1 / sz;
+  let r20 = e20 * is3;
+  let r21 = e21 * is3;
+  let r22 = e22 * is3;
+  let shXZ = d02 * is3;
+  let shYZ = d12 * is3;
+
+  out_s[0] = sx;
+  out_s[1] = sy;
+  out_s[2] = sz;
+
+  if (out_shear) {
+    out_shear[0] = shXY;
+    out_shear[1] = shXZ;
+    out_shear[2] = shYZ;
+  }
+
+  // Rotation quaternion from the orthonormalized matrix
+  let trace = r00 + r11 + r22;
   let S = 0;
 
   if (trace > 0) {
     S = Math.sqrt(trace + 1.0) * 2;
     out_r[3] = 0.25 * S;
-    out_r[0] = (sm23 - sm32) / S;
-    out_r[1] = (sm31 - sm13) / S;
-    out_r[2] = (sm12 - sm21) / S;
-  } else if (sm11 > sm22 && sm11 > sm33) {
-    S = Math.sqrt(1.0 + sm11 - sm22 - sm33) * 2;
-    out_r[3] = (sm23 - sm32) / S;
+    out_r[0] = (r12 - r21) / S;
+    out_r[1] = (r20 - r02) / S;
+    out_r[2] = (r01 - r10) / S;
+  } else if (r00 > r11 && r00 > r22) {
+    S = Math.sqrt(1.0 + r00 - r11 - r22) * 2;
+    out_r[3] = (r12 - r21) / S;
     out_r[0] = 0.25 * S;
-    out_r[1] = (sm12 + sm21) / S;
-    out_r[2] = (sm31 + sm13) / S;
-  } else if (sm22 > sm33) {
-    S = Math.sqrt(1.0 + sm22 - sm11 - sm33) * 2;
-    out_r[3] = (sm31 - sm13) / S;
-    out_r[0] = (sm12 + sm21) / S;
+    out_r[1] = (r01 + r10) / S;
+    out_r[2] = (r20 + r02) / S;
+  } else if (r11 > r22) {
+    S = Math.sqrt(1.0 + r11 - r00 - r22) * 2;
+    out_r[3] = (r20 - r02) / S;
+    out_r[0] = (r01 + r10) / S;
     out_r[1] = 0.25 * S;
-    out_r[2] = (sm23 + sm32) / S;
+    out_r[2] = (r12 + r21) / S;
   } else {
-    S = Math.sqrt(1.0 + sm33 - sm11 - sm22) * 2;
-    out_r[3] = (sm12 - sm21) / S;
-    out_r[0] = (sm31 + sm13) / S;
-    out_r[1] = (sm23 + sm32) / S;
+    S = Math.sqrt(1.0 + r22 - r00 - r11) * 2;
+    out_r[3] = (r01 - r10) / S;
+    out_r[0] = (r20 + r02) / S;
+    out_r[1] = (r12 + r21) / S;
     out_r[2] = 0.25 * S;
   }
 
@@ -1433,6 +1524,85 @@ export function fromRotationTranslationScaleOrigin(out, q, v, s, o) {
   out[12] = v[0] + ox - (out0 * ox + out4 * oy + out8 * oz);
   out[13] = v[1] + oy - (out1 * ox + out5 * oy + out9 * oz);
   out[14] = v[2] + oz - (out2 * ox + out6 * oy + out10 * oz);
+  out[15] = 1;
+
+  return out;
+}
+
+/**
+ * Creates a matrix from a quaternion rotation, vector translation, vector
+ * scale and vector shear. This is the inverse of decompose: recomposing the
+ * components returned by decompose (including its shear output) reproduces
+ * the original matrix.
+ *
+ * The resulting matrix is `T * R * Shear * Scale`, where Shear is the upper
+ * triangular matrix built from the shear factors `[xy, xz, yz]`:
+ *
+ *     1  xy  xz  0
+ *     0  1   yz  0
+ *     0  0   1   0
+ *     0  0   0   1
+ *
+ * @param {mat4} out mat4 receiving operation result
+ * @param {ReadonlyQuat} q Rotation quaternion
+ * @param {ReadonlyVec3} v Translation vector
+ * @param {ReadonlyVec3} s Scaling vector
+ * @param {ReadonlyVec3} shear Shear vector [xy, xz, yz]
+ * @returns {mat4} out
+ */
+export function fromRotationTranslationScaleShear(out, q, v, s, shear) {
+  // Quaternion math
+  let x = q[0],
+    y = q[1],
+    z = q[2],
+    w = q[3];
+  let x2 = x + x;
+  let y2 = y + y;
+  let z2 = z + z;
+
+  let xx = x * x2;
+  let xy = x * y2;
+  let xz = x * z2;
+  let yy = y * y2;
+  let yz = y * z2;
+  let zz = z * z2;
+  let wx = w * x2;
+  let wy = w * y2;
+  let wz = w * z2;
+
+  // Rotation matrix columns
+  let r00 = 1 - (yy + zz);
+  let r01 = xy + wz;
+  let r02 = xz - wy;
+  let r10 = xy - wz;
+  let r11 = 1 - (xx + zz);
+  let r12 = yz + wx;
+  let r20 = xz + wy;
+  let r21 = yz - wx;
+  let r22 = 1 - (xx + yy);
+
+  let sx = s[0];
+  let sy = s[1];
+  let sz = s[2];
+  let shXY = shear[0];
+  let shXZ = shear[1];
+  let shYZ = shear[2];
+
+  out[0] = r00 * sx;
+  out[1] = r01 * sx;
+  out[2] = r02 * sx;
+  out[3] = 0;
+  out[4] = (r10 + r00 * shXY) * sy;
+  out[5] = (r11 + r01 * shXY) * sy;
+  out[6] = (r12 + r02 * shXY) * sy;
+  out[7] = 0;
+  out[8] = (r20 + r00 * shXZ + r10 * shYZ) * sz;
+  out[9] = (r21 + r01 * shXZ + r11 * shYZ) * sz;
+  out[10] = (r22 + r02 * shXZ + r12 * shYZ) * sz;
+  out[11] = 0;
+  out[12] = v[0];
+  out[13] = v[1];
+  out[14] = v[2];
   out[15] = 1;
 
   return out;
