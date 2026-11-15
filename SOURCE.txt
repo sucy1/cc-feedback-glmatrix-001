@@ -1,0 +1,4 @@
+source: https://github.com/toji/gl-matrix
+commit: 6f96d577ee0217b5cfce334e2cad92a6ac3572d2
+license: MIT
+imported: 2026-11-15
